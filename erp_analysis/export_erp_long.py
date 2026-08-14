@@ -792,18 +792,20 @@ def normalise_stim_file(
     )
 
 
+def infer_trial_type_from_stim_file(series: pd.Series) -> pd.Series:
+    values = normalise_stim_file(series)
+    upper_values = values.astype("string").str.upper()
+
+    trial_type = pd.Series("", index=values.index, dtype="string")
+    trial_type = trial_type.mask(upper_values.str.contains("NPC", na=False), "NPC")
+    trial_type = trial_type.mask(upper_values.str.contains("NPI", na=False), "NPI")
+
+    return trial_type
+
+
 def load_stimulus_lookup(
     language_metrics_path: Path,
 ) -> pd.DataFrame:
-    """
-    Load language_outputs/ALL_language_metrics.tsv and create
-    a validated stim_file -> stim_key lookup.
-
-    This should use ALL_language_metrics.tsv, not
-    ALL_language_metrics_GLM.tsv, because this lookup needs both
-    stim_file and stim_key.
-    """
-
     language_metrics_path = Path(
         language_metrics_path
     ).expanduser().resolve()
@@ -839,8 +841,7 @@ def load_stimulus_lookup(
     if missing_columns:
         raise ValueError(
             "Language metrics table is missing required columns: "
-            f"{missing_columns}. Use ALL_language_metrics.tsv, not "
-            "ALL_language_metrics_GLM.tsv, for stim_file matching."
+            f"{missing_columns}. Use ALL_language_metrics.tsv."
         )
 
     lookup = metrics[
@@ -850,12 +851,22 @@ def load_stimulus_lookup(
         ]
     ].copy()
 
+    lookup["original_event_row"] = np.arange(
+        1,
+        len(lookup) + 1,
+        dtype=int,
+    )
+
     lookup["stim_file"] = normalise_stim_file(
         lookup["stim_file"]
     )
 
     lookup["stim_key"] = normalise_stim_key(
         lookup["stim_key"]
+    )
+
+    lookup["trial_type"] = infer_trial_type_from_stim_file(
+        lookup["stim_file"]
     )
 
     missing_stim_files = (
@@ -882,6 +893,35 @@ def load_stimulus_lookup(
             "stim_key values."
         )
 
+    missing_trial_type = (
+        lookup["trial_type"].isna()
+        | lookup["trial_type"].eq("")
+    )
+
+    if missing_trial_type.any():
+        examples = (
+            lookup.loc[
+                missing_trial_type,
+                "stim_file",
+            ]
+            .head(10)
+            .tolist()
+        )
+
+        raise ValueError(
+            "Could not infer NPC/NPI trial_type from some stim_file values. "
+            f"Examples: {examples}"
+        )
+
+    duplicated_event_rows = lookup["original_event_row"].duplicated(
+        keep=False
+    )
+
+    if duplicated_event_rows.any():
+        raise ValueError(
+            "Language metrics table produced duplicate original_event_row values."
+        )
+
     conflicting = (
         lookup
         .groupby(
@@ -902,19 +942,6 @@ def load_stimulus_lookup(
             "Some stim_file values map to more than one stim_key. "
             f"Examples: {conflicting.index[:10].tolist()}"
         )
-
-    lookup = (
-        lookup
-        .drop_duplicates(
-            subset=[
-                "stim_file",
-            ],
-            keep="first",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
 
     print(
         f"Loaded {len(lookup)} stimulus mappings from "
@@ -1192,7 +1219,10 @@ def export_lookup_for_file(
                 condition_index=condition_index,
             )
 
-            data, n_trials, n_timepoints, n_channels = extract_data(condition_group)
+            data, n_trials, n_timepoints, n_channels = extract_data(
+                condition_group
+            )
+
             mat_retained_trials = int(n_trials)
 
             if mat_retained_trials != reported_retained_trials:
@@ -1210,12 +1240,6 @@ def export_lookup_for_file(
                 n_trials=mat_retained_trials,
             )
 
-            stimulus_table = extract_epoch_stimulus_table(
-                file=file,
-                condition_group=condition_group,
-                n_trials=mat_retained_trials,
-            )
-
             trial_lookup = pd.DataFrame(
                 {
                     "subject": subject,
@@ -1227,68 +1251,54 @@ def export_lookup_for_file(
                     "before_trial_rejection": before_trials,
                     "after_trial_rejection_reported": reported_retained_trials,
                     "after_trial_rejection_mat": mat_retained_trials,
-                    "retained_trial": np.arange(1, mat_retained_trials + 1, dtype=int),
+                    "retained_trial": np.arange(
+                        1,
+                        mat_retained_trials + 1,
+                        dtype=int,
+                    ),
                     "urevent_index": urevent_indices,
                     "original_event_row": urevent_indices,
                 }
             )
 
-            trial_lookup = pd.concat(
-                [
-                    trial_lookup.reset_index(drop=True),
-                    stimulus_table.reset_index(drop=True),
-                ],
-                axis=1,
-            )
-
-            missing_stim_key = (
-                trial_lookup["stim_key"].isna()
-                | trial_lookup["stim_key"].astype("string").str.strip().eq("")
-            )
-
-            missing_stim_file = (
-                trial_lookup["stim_file"].isna()
-                | trial_lookup["stim_file"].astype("string").str.strip().eq("")
-            )
-
-            if missing_stim_key.any() and not missing_stim_file.any():
-                trial_lookup = trial_lookup.drop(
-                    columns=[
+            trial_lookup = trial_lookup.merge(
+                stimulus_lookup[
+                    [
+                        "original_event_row",
+                        "trial_type",
+                        "stim_file",
                         "stim_key",
                     ]
-                )
+                ],
+                on="original_event_row",
+                how="left",
+                validate="many_to_one",
+                sort=False,
+                indicator=True,
+            )
 
-                trial_lookup = trial_lookup.merge(
-                    stimulus_lookup,
-                    on="stim_file",
-                    how="left",
-                    validate="many_to_one",
-                    sort=False,
-                    indicator=True,
-                )
+            unmatched = trial_lookup["_merge"] != "both"
 
-                unmatched = trial_lookup["_merge"] != "both"
-
-                if unmatched.any():
-                    examples = (
-                        trial_lookup.loc[
-                            unmatched,
-                            "stim_file",
-                        ]
-                        .drop_duplicates()
-                        .head(10)
-                        .tolist()
-                    )
-
-                    raise ValueError(
-                        f"{int(unmatched.sum())} retained ERP trials could not be matched to language metrics using stim_file. Examples: {examples}"
-                    )
-
-                trial_lookup = trial_lookup.drop(
-                    columns=[
-                        "_merge",
+            if unmatched.any():
+                examples = (
+                    trial_lookup.loc[
+                        unmatched,
+                        "original_event_row",
                     ]
+                    .drop_duplicates()
+                    .head(20)
+                    .tolist()
                 )
+
+                raise ValueError(
+                    f"{int(unmatched.sum())} retained ERP trials could not be matched to ALL_language_metrics.tsv using original_event_row/eventurevent. Examples: {examples}"
+                )
+
+            trial_lookup = trial_lookup.drop(
+                columns=[
+                    "_merge",
+                ]
+            )
 
             missing_stim_key = (
                 trial_lookup["stim_key"].isna()
@@ -1298,6 +1308,11 @@ def export_lookup_for_file(
             missing_stim_file = (
                 trial_lookup["stim_file"].isna()
                 | trial_lookup["stim_file"].astype("string").str.strip().eq("")
+            )
+
+            missing_trial_type = (
+                trial_lookup["trial_type"].isna()
+                | trial_lookup["trial_type"].astype("string").str.strip().eq("")
             )
 
             if missing_stim_key.any():
@@ -1305,6 +1320,9 @@ def export_lookup_for_file(
 
             if missing_stim_file.any():
                 raise ValueError("Some retained ERP trials have missing stim_file.")
+
+            if missing_trial_type.any():
+                raise ValueError("Some retained ERP trials have missing trial_type.")
 
             trial_lookup["epoch_id"] = (
                 trial_lookup["subject"].astype(str)
