@@ -1185,6 +1185,62 @@ def export_lookup_for_file(
 
     all_trial_lookups = []
 
+    stimulus_lookup_for_merge = stimulus_lookup.copy()
+
+    if "stimulus_row" not in stimulus_lookup_for_merge.columns:
+        if "original_event_row" in stimulus_lookup_for_merge.columns:
+            stimulus_lookup_for_merge["stimulus_row"] = pd.to_numeric(
+                stimulus_lookup_for_merge["original_event_row"],
+                errors="raise",
+            ).astype(int)
+        else:
+            stimulus_lookup_for_merge["stimulus_row"] = np.arange(
+                1,
+                len(stimulus_lookup_for_merge) + 1,
+                dtype=int,
+            )
+
+    required_stimulus_columns = [
+        "stimulus_row",
+        "trial_type",
+        "stim_file",
+        "stim_key",
+    ]
+
+    missing_stimulus_columns = [
+        column
+        for column in required_stimulus_columns
+        if column not in stimulus_lookup_for_merge.columns
+    ]
+
+    if missing_stimulus_columns:
+        raise ValueError(
+            f"Stimulus lookup is missing required columns: {missing_stimulus_columns}"
+        )
+
+    n_stimuli = int(len(stimulus_lookup_for_merge))
+
+    if n_stimuli <= 0:
+        raise ValueError("Stimulus lookup is empty.")
+
+    duplicated_stimulus_rows = stimulus_lookup_for_merge["stimulus_row"].duplicated(
+        keep=False,
+    )
+
+    if duplicated_stimulus_rows.any():
+        examples = (
+            stimulus_lookup_for_merge.loc[
+                duplicated_stimulus_rows,
+                "stimulus_row",
+            ]
+            .head(20)
+            .tolist()
+        )
+
+        raise ValueError(
+            f"Stimulus lookup contains duplicate stimulus_row values. Examples: {examples}"
+        )
+
     with h5py.File(mat_path, "r") as file:
         if "ERPs" not in file:
             raise KeyError("No ERPs dataset found in MAT file.")
@@ -1261,16 +1317,24 @@ def export_lookup_for_file(
                 }
             )
 
+            trial_lookup["stimulus_row"] = (
+                (
+                    trial_lookup["original_event_row"].astype(int)
+                    - 1
+                )
+                % n_stimuli
+            ) + 1
+
             trial_lookup = trial_lookup.merge(
-                stimulus_lookup[
+                stimulus_lookup_for_merge[
                     [
-                        "original_event_row",
+                        "stimulus_row",
                         "trial_type",
                         "stim_file",
                         "stim_key",
                     ]
                 ],
-                on="original_event_row",
+                on="stimulus_row",
                 how="left",
                 validate="many_to_one",
                 sort=False,
@@ -1283,15 +1347,18 @@ def export_lookup_for_file(
                 examples = (
                     trial_lookup.loc[
                         unmatched,
-                        "original_event_row",
+                        [
+                            "original_event_row",
+                            "stimulus_row",
+                        ],
                     ]
                     .drop_duplicates()
                     .head(20)
-                    .tolist()
+                    .to_dict("records")
                 )
 
                 raise ValueError(
-                    f"{int(unmatched.sum())} retained ERP trials could not be matched to ALL_language_metrics.tsv using original_event_row/eventurevent. Examples: {examples}"
+                    f"{int(unmatched.sum())} retained ERP trials could not be matched to ALL_language_metrics.tsv using wrapped eventurevent stimulus_row. Examples: {examples}"
                 )
 
             trial_lookup = trial_lookup.drop(
@@ -1409,6 +1476,7 @@ def export_lookup_for_file(
         "retained_trial",
         "urevent_index",
         "original_event_row",
+        "stimulus_row",
         "trial_type",
         "stim_file",
         "stim_key",
