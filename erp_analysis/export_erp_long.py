@@ -923,261 +923,185 @@ def load_stimulus_lookup(
 
     return lookup
 
+def decode_matlab_value(file, value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore").strip()
 
-def find_subject_events_path(
-    events_root: Path,
-    subject: str,
-) -> Path:
-    """
-    Find the subject events.tsv file.
+    if isinstance(value, str):
+        return value.strip()
 
-    The function checks the common possible locations.
-    """
+    if isinstance(value, h5py.Reference):
+        if not value:
+            return ""
 
-    events_root = Path(
-        events_root
-    ).expanduser().resolve()
+        obj = file[value]
+        arr = np.asarray(obj).squeeze()
+        return decode_matlab_value(file, arr)
 
-    candidates = [
-        events_root
-        / subject
-        / "eeg"
-        / f"{subject}_task-N400Stimset_events.tsv",
+    arr = np.asarray(value).squeeze()
 
-        events_root
-        / subject
-        / f"{subject}_task-N400Stimset_events.tsv",
+    if arr.dtype.kind in {"u", "i"} and arr.size > 1:
+        return "".join(chr(int(x)) for x in np.ravel(arr) if int(x) != 0).strip()
 
-        events_root
-        / "events"
-        / f"{subject}_task-N400Stimset_events.tsv",
+    if arr.dtype.kind in {"S", "U"}:
+        if arr.size == 1:
+            return str(arr.item()).strip()
 
-        events_root
-        / "erps"
-        / subject
-        / f"{subject}_task-N400Stimset_events.tsv",
-    ]
+        return "".join(str(x) for x in np.ravel(arr)).strip()
 
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-
-    searched = "\n".join(
-        str(path)
-        for path in candidates
-    )
-
-    raise FileNotFoundError(
-        "Could not find events.tsv for subject "
-        f"{subject}. Searched:\n{searched}"
-    )
-
-
-def choose_urevent_column(
-    events: pd.DataFrame,
-) -> str | None:
-
-    candidate_columns = [
-        "urevent_index",
-        "urevent",
-        "eventurevent",
-        "original_urevent",
-        "eeglab_urevent",
-    ]
-
-    for column in candidate_columns:
-        if column in events.columns:
-            return column
-
-    return None
-
-
-def load_subject_event_mapping(
-    events_root: Path,
-    subject: str,
-    stimulus_lookup: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Load one subject events.tsv and attach stim_key.
-
-    Output columns:
-
-        urevent_index
-        original_event_row
-        trial_type
-        stim_file
-        stim_key
-    """
-
-    events_path = find_subject_events_path(
-        events_root=events_root,
-        subject=subject,
-    )
-
-    events = pd.read_csv(
-        events_path,
-        sep="\t",
-    )
-
-    if events.empty:
-        raise ValueError(
-            f"Events file is empty: {events_path}"
-        )
-
-    required_columns = [
-        "trial_type",
-        "stim_file",
-    ]
-
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in events.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            f"{events_path} is missing required columns: "
-            f"{missing_columns}"
-        )
-
-    events = events.copy()
-
-    events["original_event_row"] = range(
-        1,
-        len(events) + 1,
-    )
-
-    explicit_urevent_column = choose_urevent_column(
-        events
-    )
-
-    if explicit_urevent_column is not None:
-        events["urevent_index"] = pd.to_numeric(
-            events[
-                explicit_urevent_column
-            ],
-            errors="raise",
-        ).astype(int)
-    else:
-        events["urevent_index"] = events[
-            "original_event_row"
-        ].astype(int)
-
-    events["trial_type"] = (
-        events[
-            "trial_type"
+    if arr.dtype.kind == "O":
+        values = [
+            decode_matlab_value(file, item)
+            for item in np.ravel(arr)
         ]
-        .astype("string")
-        .str.strip()
-        .str.upper()
-    )
 
-    events["stim_file"] = normalise_stim_file(
-        events[
-            "stim_file"
+        values = [
+            item
+            for item in values
+            if item
         ]
-    )
 
-    usable_events = events[
-        events["stim_file"].notna()
-        & events["stim_file"].ne("")
-    ].copy()
+        if values:
+            return values[0]
 
-    if usable_events.empty:
-        raise ValueError(
-            f"No events with usable stim_file values found in "
-            f"{events_path}"
+        return ""
+
+    if arr.size == 1:
+        return str(arr.item()).strip()
+
+    return str(arr).strip()
+
+
+def get_epoch_dataset_value(dataset, trial_index, n_trials):
+    if dataset.ndim == 1:
+        return dataset[trial_index]
+
+    if dataset.ndim == 2:
+        if dataset.shape[0] == n_trials:
+            return dataset[trial_index, 0]
+
+        if dataset.shape[1] == n_trials:
+            return dataset[0, trial_index]
+
+    return dataset[trial_index]
+
+
+def extract_epoch_text_field(file, epoch_group, field_name, n_trials):
+    if field_name not in epoch_group:
+        return None
+
+    dataset = epoch_group[field_name]
+    values = []
+
+    for trial_index in range(n_trials):
+        raw_value = get_epoch_dataset_value(
+            dataset=dataset,
+            trial_index=trial_index,
+            n_trials=n_trials,
         )
 
-    usable_events = usable_events.merge(
-        stimulus_lookup,
-        on="stim_file",
-        how="left",
-        validate="many_to_one",
-        sort=False,
-        indicator=True,
-    )
-
-    unmatched = (
-        usable_events[
-            "_merge"
-        ]
-        != "both"
-    )
-
-    if unmatched.any():
-        examples = (
-            usable_events.loc[
-                unmatched,
-                "stim_file",
-            ]
-            .drop_duplicates()
-            .head(
-                10
-            )
-            .tolist()
-        )
-
-        raise ValueError(
-            f"{int(unmatched.sum())} events could not be matched "
-            "to language metrics using stim_file. "
-            f"Examples: {examples}"
-        )
-
-    usable_events = usable_events.drop(
-        columns=[
-            "_merge",
-        ]
-    )
-
-    duplicated_urevents = usable_events.duplicated(
-        subset=[
-            "urevent_index",
-        ],
-        keep=False,
-    )
-
-    if duplicated_urevents.any():
-        examples = (
-            usable_events.loc[
-                duplicated_urevents,
-                [
-                    "urevent_index",
-                    "original_event_row",
-                    "stim_file",
-                    "stim_key",
-                ],
-            ]
-            .head(
-                10
-            )
-            .to_dict(
-                "records"
+        values.append(
+            decode_matlab_value(
+                file=file,
+                value=raw_value,
             )
         )
 
-        raise ValueError(
-            "Events mapping contains duplicate urevent_index "
-            f"values. Examples: {examples}"
+    return values
+
+
+def choose_epoch_text_field(file, epoch_group, n_trials, candidate_names):
+    for field_name in candidate_names:
+        values = extract_epoch_text_field(
+            file=file,
+            epoch_group=epoch_group,
+            field_name=field_name,
+            n_trials=n_trials,
         )
 
-    mapping = usable_events[
-        [
-            "urevent_index",
-            "original_event_row",
-            "trial_type",
+        if values is None:
+            continue
+
+        values = [
+            str(value).strip()
+            for value in values
+        ]
+
+        if any(values):
+            return field_name, values
+
+    return None, None
+
+
+def extract_epoch_stimulus_table(file, condition_group, n_trials):
+    if "epoch" not in condition_group:
+        raise KeyError("No epoch structure found in ERP condition.")
+
+    epoch_group = condition_group["epoch"]
+
+    stim_file_field, stim_file_values = choose_epoch_text_field(
+        file=file,
+        epoch_group=epoch_group,
+        n_trials=n_trials,
+        candidate_names=[
+            "eventstim_file",
             "stim_file",
+            "eventfilename",
+            "filename",
+            "eventfile",
+            "file",
+        ],
+    )
+
+    stim_key_field, stim_key_values = choose_epoch_text_field(
+        file=file,
+        epoch_group=epoch_group,
+        n_trials=n_trials,
+        candidate_names=[
+            "eventstim_key",
             "stim_key",
-        ]
-    ].copy()
+            "eventsentence_id",
+            "sentence_id",
+            "eventitem",
+            "item",
+        ],
+    )
+
+    trial_type_field, trial_type_values = choose_epoch_text_field(
+        file=file,
+        epoch_group=epoch_group,
+        n_trials=n_trials,
+        candidate_names=[
+            "eventtrial_type",
+            "trial_type",
+            "eventtype",
+            "type",
+        ],
+    )
+
+    if stim_file_values is None and stim_key_values is None:
+        raise KeyError(
+            "No stim_file or stim_key field was found inside the ERP MAT epoch structure. "
+            f"Available epoch fields: {list(epoch_group.keys())}"
+        )
+
+    table = pd.DataFrame(
+        {
+            "trial_type": trial_type_values if trial_type_values is not None else [""] * n_trials,
+            "stim_file": stim_file_values if stim_file_values is not None else [""] * n_trials,
+            "stim_key": stim_key_values if stim_key_values is not None else [""] * n_trials,
+        }
+    )
+
+    table["trial_type"] = table["trial_type"].astype("string").str.strip().str.upper()
+    table["stim_file"] = normalise_stim_file(table["stim_file"])
+    table["stim_key"] = normalise_stim_key(table["stim_key"])
 
     print(
-        f"Loaded {len(mapping)} event-to-stimulus mappings "
-        f"for {subject} from {events_path}"
+        f"  MAT stimulus fields: trial_type={trial_type_field}, stim_file={stim_file_field}, stim_key={stim_key_field}"
     )
 
-    return mapping
+    return table
 
 def append_tsv(dataframe: pd.DataFrame, path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1221,17 +1145,10 @@ def load_completed_export_keys(log_path: Path) -> set[tuple[str, str, str]]:
 
 def export_lookup_for_file(
     mat_path: Path,
-    events_root: Path,
     stimulus_lookup: pd.DataFrame,
 ) -> pd.DataFrame:
     subject = get_subject_id(mat_path)
     analysis = get_analysis_name(mat_path)
-
-    event_mapping = load_subject_event_mapping(
-        events_root=events_root,
-        subject=subject,
-        stimulus_lookup=stimulus_lookup,
-    )
 
     rejection_summary = load_trial_rejection_summary(mat_path)
     rejection_path = get_trial_rejection_path(mat_path)
@@ -1293,12 +1210,11 @@ def export_lookup_for_file(
                 n_trials=mat_retained_trials,
             )
 
-            if len(urevent_indices) != mat_retained_trials:
-                raise ValueError(
-                    "Number of extracted urevent indices does not "
-                    f"match retained trials: {len(urevent_indices)} "
-                    f"versus {mat_retained_trials}"
-                )
+            stimulus_table = extract_epoch_stimulus_table(
+                file=file,
+                condition_group=condition_group,
+                n_trials=mat_retained_trials,
+            )
 
             trial_lookup = pd.DataFrame(
                 {
@@ -1313,48 +1229,82 @@ def export_lookup_for_file(
                     "after_trial_rejection_mat": mat_retained_trials,
                     "retained_trial": np.arange(1, mat_retained_trials + 1, dtype=int),
                     "urevent_index": urevent_indices,
+                    "original_event_row": urevent_indices,
                 }
             )
 
-            trial_lookup = trial_lookup.merge(
-                event_mapping,
-                on="urevent_index",
-                how="left",
-                validate="many_to_one",
-                sort=False,
-                indicator=True,
+            trial_lookup = pd.concat(
+                [
+                    trial_lookup.reset_index(drop=True),
+                    stimulus_table.reset_index(drop=True),
+                ],
+                axis=1,
             )
-
-            unmatched = trial_lookup["_merge"] != "both"
-
-            if unmatched.any():
-                examples = (
-                    trial_lookup.loc[
-                        unmatched,
-                        ["condition", "retained_trial", "urevent_index"],
-                    ]
-                    .head(10)
-                    .to_dict("records")
-                )
-
-                raise ValueError(
-                    "Some retained ERP trials could not be matched "
-                    "to events.tsv using urevent_index. "
-                    f"Examples: {examples}"
-                )
-
-            trial_lookup = trial_lookup.drop(columns=["_merge"])
 
             missing_stim_key = (
                 trial_lookup["stim_key"].isna()
                 | trial_lookup["stim_key"].astype("string").str.strip().eq("")
             )
 
-            if missing_stim_key.any():
-                raise ValueError(
-                    "Some retained ERP trials have missing stim_key "
-                    "after event matching."
+            missing_stim_file = (
+                trial_lookup["stim_file"].isna()
+                | trial_lookup["stim_file"].astype("string").str.strip().eq("")
+            )
+
+            if missing_stim_key.any() and not missing_stim_file.any():
+                trial_lookup = trial_lookup.drop(
+                    columns=[
+                        "stim_key",
+                    ]
                 )
+
+                trial_lookup = trial_lookup.merge(
+                    stimulus_lookup,
+                    on="stim_file",
+                    how="left",
+                    validate="many_to_one",
+                    sort=False,
+                    indicator=True,
+                )
+
+                unmatched = trial_lookup["_merge"] != "both"
+
+                if unmatched.any():
+                    examples = (
+                        trial_lookup.loc[
+                            unmatched,
+                            "stim_file",
+                        ]
+                        .drop_duplicates()
+                        .head(10)
+                        .tolist()
+                    )
+
+                    raise ValueError(
+                        f"{int(unmatched.sum())} retained ERP trials could not be matched to language metrics using stim_file. Examples: {examples}"
+                    )
+
+                trial_lookup = trial_lookup.drop(
+                    columns=[
+                        "_merge",
+                    ]
+                )
+
+            missing_stim_key = (
+                trial_lookup["stim_key"].isna()
+                | trial_lookup["stim_key"].astype("string").str.strip().eq("")
+            )
+
+            missing_stim_file = (
+                trial_lookup["stim_file"].isna()
+                | trial_lookup["stim_file"].astype("string").str.strip().eq("")
+            )
+
+            if missing_stim_key.any():
+                raise ValueError("Some retained ERP trials have missing stim_key.")
+
+            if missing_stim_file.any():
+                raise ValueError("Some retained ERP trials have missing stim_file.")
 
             trial_lookup["epoch_id"] = (
                 trial_lookup["subject"].astype(str)
@@ -1382,10 +1332,18 @@ def export_lookup_for_file(
             f"{mat_path.name}."
         )
 
-    trial_lookup_all = pd.concat(all_trial_lookups, ignore_index=True)
+    trial_lookup_all = pd.concat(
+        all_trial_lookups,
+        ignore_index=True,
+    )
 
     duplicated_lookup_rows = trial_lookup_all.duplicated(
-        subset=["subject", "analysis", "condition", "retained_trial"],
+        subset=[
+            "subject",
+            "analysis",
+            "condition",
+            "retained_trial",
+        ],
         keep=False,
     )
 
@@ -1393,54 +1351,32 @@ def export_lookup_for_file(
         examples = (
             trial_lookup_all.loc[
                 duplicated_lookup_rows,
-                ["subject", "analysis", "condition", "retained_trial"],
+                [
+                    "subject",
+                    "analysis",
+                    "condition",
+                    "retained_trial",
+                ],
             ]
             .head(10)
             .to_dict("records")
         )
 
         raise ValueError(
-            "Duplicate retained-trial lookup rows were found. "
-            f"Examples: {examples}"
+            f"Duplicate retained-trial lookup rows were found. Examples: {examples}"
         )
 
     duplicated_epoch_ids = trial_lookup_all.duplicated(
-        subset=["epoch_id"],
+        subset=[
+            "epoch_id",
+        ],
         keep=False,
     )
 
     if duplicated_epoch_ids.any():
         raise ValueError(
-            "Duplicate epoch_id values were created for "
-            f"{mat_path.name}."
+            f"Duplicate epoch_id values were created for {mat_path.name}."
         )
-
-    required_columns = [
-        "original_event_row",
-        "trial_type",
-        "stim_file",
-        "stim_key",
-    ]
-
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in trial_lookup_all.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            "Trial lookup is missing columns: "
-            f"{missing_columns}"
-        )
-
-    missing_stim_key = (
-        trial_lookup_all["stim_key"].isna()
-        | trial_lookup_all["stim_key"].astype("string").str.strip().eq("")
-    )
-
-    if missing_stim_key.any():
-        raise ValueError("Final trial lookup contains missing stim_key values.")
 
     ordered_columns = [
         "subject",
@@ -1467,7 +1403,10 @@ def export_lookup_for_file(
         if column not in ordered_columns
     ]
 
-    return trial_lookup_all[ordered_columns + remaining_columns]
+    return trial_lookup_all[
+        ordered_columns
+        + remaining_columns
+    ]
 
 
 def discover_erp_mat_files(
@@ -1698,12 +1637,6 @@ def main():
     )
 
     parser.add_argument(
-        "--events-root",
-        required=True,
-        help="Root folder containing subject events.tsv files.",
-    )
-
-    parser.add_argument(
         "--language-metrics",
         required=True,
         help=(
@@ -1737,7 +1670,6 @@ def main():
 
     erp_root = Path(args.erp_root).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
-    events_root = Path(args.events_root).expanduser().resolve()
     language_metrics_path = Path(args.language_metrics).expanduser().resolve()
     analyses = parse_analysis_list(args.analyses)
     subjects = parse_subject_list(args.subjects)
@@ -1749,7 +1681,11 @@ def main():
     failed_path = output_dir / "failed_erp_lookup_exports.tsv"
 
     if args.overwrite:
-        for path in [combined_path, log_path, failed_path]:
+        for path in [
+            combined_path,
+            log_path,
+            failed_path,
+        ]:
             if path.exists():
                 path.unlink()
 
@@ -1760,7 +1696,9 @@ def main():
         )
 
     if not erp_root.exists():
-        raise FileNotFoundError(f"ERP root not found: {erp_root}")
+        raise FileNotFoundError(
+            f"ERP root not found: {erp_root}"
+        )
 
     if not erp_root.is_dir():
         raise NotADirectoryError(
@@ -1768,16 +1706,9 @@ def main():
             f"{erp_root}"
         )
 
-    if not events_root.exists():
-        raise FileNotFoundError(f"Events root not found: {events_root}")
-
-    if not events_root.is_dir():
-        raise NotADirectoryError(
-            "Events root is not a directory: "
-            f"{events_root}"
-        )
-
-    stimulus_lookup = load_stimulus_lookup(language_metrics_path)
+    stimulus_lookup = load_stimulus_lookup(
+        language_metrics_path
+    )
 
     mat_files = discover_erp_mat_files(
         erp_root=erp_root,
@@ -1785,21 +1716,34 @@ def main():
     )
 
     if subjects is not None:
-        requested_subjects = set(subjects)
+        requested_subjects = set(
+            subjects
+        )
+
         mat_files = [
             mat_path
             for mat_path in mat_files
-            if get_subject_id(mat_path) in requested_subjects
+            if get_subject_id(
+                mat_path
+            )
+            in requested_subjects
         ]
 
     if not mat_files:
         searched_patterns = "\n".join(
             [
-                str(erp_root / "sub-*" / f"*_erp-{analysis}.mat")
+                str(
+                    erp_root
+                    / "sub-*"
+                    / f"*_erp-{analysis}.mat"
+                )
                 for analysis in analyses
             ]
             + [
-                str(erp_root / f"*_erp-{analysis}.mat")
+                str(
+                    erp_root
+                    / f"*_erp-{analysis}.mat"
+                )
                 for analysis in analyses
             ]
         )
@@ -1807,7 +1751,9 @@ def main():
         if subjects is None:
             subject_message = "Subjects: ALL"
         else:
-            subject_message = "Subjects: " + ", ".join(subjects)
+            subject_message = "Subjects: " + ", ".join(
+                subjects
+            )
 
         raise FileNotFoundError(
             "No matching ERP MAT files were found. "
@@ -1818,7 +1764,9 @@ def main():
 
     if subjects is not None:
         found_subjects = {
-            get_subject_id(mat_path)
+            get_subject_id(
+                mat_path
+            )
             for mat_path in mat_files
         }
 
@@ -1835,9 +1783,13 @@ def main():
             )
 
     missing_rejection_files = [
-        get_trial_rejection_path(mat_path)
+        get_trial_rejection_path(
+            mat_path
+        )
         for mat_path in mat_files
-        if not get_trial_rejection_path(mat_path).exists()
+        if not get_trial_rejection_path(
+            mat_path
+        ).exists()
     ]
 
     if missing_rejection_files:
@@ -1852,44 +1804,87 @@ def main():
             f"{examples}"
         )
 
-    completed_keys = load_completed_export_keys(log_path) if args.resume else set()
+    completed_keys = (
+        load_completed_export_keys(
+            log_path
+        )
+        if args.resume
+        else set()
+    )
 
-    print(f"Found {len(mat_files)} ERP MAT files.")
-    print(f"Using ERP root: {erp_root}")
-    print("Analyses: " + ", ".join(analyses))
+    print(
+        f"Found {len(mat_files)} ERP MAT files."
+    )
+
+    print(
+        f"Using ERP root: {erp_root}"
+    )
+
+    print(
+        "Analyses: " + ", ".join(
+            analyses
+        )
+    )
 
     if subjects is None:
-        print("Subjects: ALL")
+        print(
+            "Subjects: ALL"
+        )
     else:
-        print("Subjects: " + ", ".join(subjects))
+        print(
+            "Subjects: " + ", ".join(
+                subjects
+            )
+        )
 
-    print(f"Events root: {events_root}")
-    print(f"Language metrics: {language_metrics_path}")
-    print(f"Combined lookup: {combined_path}")
+    print(
+        f"Language metrics: {language_metrics_path}"
+    )
+
+    print(
+        f"Combined lookup: {combined_path}"
+    )
 
     success_count = 0
     skipped_count = 0
     failed_count = 0
 
     for mat_path in mat_files:
-        subject = get_subject_id(mat_path)
-        analysis = get_analysis_name(mat_path)
+        subject = get_subject_id(
+            mat_path
+        )
+
+        analysis = get_analysis_name(
+            mat_path
+        )
+
         source_file = mat_path.name
-        key = (subject, analysis, source_file)
+
+        key = (
+            subject,
+            analysis,
+            source_file,
+        )
 
         if key in completed_keys:
-            print(f"SKIP already done: {source_file}")
+            print(
+                f"SKIP already done: {source_file}"
+            )
+
             skipped_count += 1
+
             continue
 
         try:
             lookup = export_lookup_for_file(
                 mat_path=mat_path,
-                events_root=events_root,
                 stimulus_lookup=stimulus_lookup,
             )
 
-            append_tsv(lookup, combined_path)
+            append_tsv(
+                lookup,
+                combined_path,
+            )
 
             append_export_log(
                 log_path,
@@ -1897,53 +1892,108 @@ def main():
                     "subject": subject,
                     "analysis": analysis,
                     "source_file": source_file,
-                    "source_path": str(mat_path),
+                    "source_path": str(
+                        mat_path
+                    ),
                     "status": "done",
-                    "n_rows": len(lookup),
+                    "n_rows": len(
+                        lookup
+                    ),
                     "error": "",
                 },
             )
 
             success_count += 1
-            print(f"Saved {len(lookup)} rows from {source_file}")
+
+            print(
+                f"Saved {len(lookup)} rows from {source_file}"
+            )
+
             del lookup
 
         except Exception as error:
             failed_count += 1
-            error_message = str(error)
-            print(f"FAILED: {source_file}: {error_message}")
+
+            error_message = str(
+                error
+            )
+
+            print(
+                f"FAILED: {source_file}: {error_message}"
+            )
 
             failed_row = {
                 "subject": subject,
                 "analysis": analysis,
                 "source_file": source_file,
-                "source_path": str(mat_path),
+                "source_path": str(
+                    mat_path
+                ),
                 "status": "failed",
                 "n_rows": 0,
                 "error": error_message,
             }
 
-            append_export_log(log_path, failed_row)
-            append_tsv(pd.DataFrame([failed_row]), failed_path)
+            append_export_log(
+                log_path,
+                failed_row,
+            )
+
+            append_tsv(
+                pd.DataFrame(
+                    [
+                        failed_row
+                    ]
+                ),
+                failed_path,
+            )
 
     if not combined_path.exists():
-        raise RuntimeError("No lookup rows were exported successfully.")
+        raise RuntimeError(
+            "No lookup rows were exported successfully."
+        )
 
-    combined_check = pd.read_csv(combined_path, sep="\t", usecols=["subject"])
+    combined_check = pd.read_csv(
+        combined_path,
+        sep="\t",
+        usecols=[
+            "subject",
+        ],
+    )
 
     if combined_check.empty:
-        raise RuntimeError("Combined lookup file exists but is empty.")
+        raise RuntimeError(
+            "Combined lookup file exists but is empty."
+        )
 
-    print(f"Successful exports: {success_count}")
-    print(f"Skipped exports: {skipped_count}")
-    print(f"Failed exports: {failed_count}")
-    print(f"Final combined lookup: {combined_path}")
-    print(f"Export log: {log_path}")
+    print(
+        f"Successful exports: {success_count}"
+    )
+
+    print(
+        f"Skipped exports: {skipped_count}"
+    )
+
+    print(
+        f"Failed exports: {failed_count}"
+    )
+
+    print(
+        f"Final combined lookup: {combined_path}"
+    )
+
+    print(
+        f"Export log: {log_path}"
+    )
 
     if failed_count:
-        print(f"Failed export report: {failed_path}")
+        print(
+            f"Failed export report: {failed_path}"
+        )
 
-    print("Done.")
+    print(
+        "Done."
+    )
 
 if __name__ == "__main__":
     main()

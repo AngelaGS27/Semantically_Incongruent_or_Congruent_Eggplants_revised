@@ -1,34 +1,9 @@
-"""
-Prepare a subject-specific design matrix for LIMO.
-
-The script:
-
-1. Loads the subject events.tsv.
-2. Extracts a stable stimulus identifier as stim_key.
-3. Optionally keeps only trials listed in a surviving-trials file.
-4. Matches each trial to the language predictors using stim_key.
-5. Validates duplicates, unmatched trials, and trial order.
-6. Saves a subject-specific design matrix.
-
-This script prepares the input table used by the LIMO analysis.
-"""
-
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
 
 import pandas as pd
-
-
-STIMULUS_COLUMNS = [
-    "stim_key",
-    "stim_file",
-    "stimulus",
-    "sentence_id",
-    "item",
-    "trial",
-]
 
 
 def normalise_stim_key(series: pd.Series) -> pd.Series:
@@ -64,138 +39,6 @@ def normalise_stim_file(
         .str[-1]
     )
 
-def load_stimulus_lookup(
-    language_metrics_path: Path,
-) -> pd.DataFrame:
-    """
-    Load the complete language metrics table and create a validated
-    stim_file -> stim_key lookup.
-
-    Expected input:
-        language_outputs/ALL_language_metrics.tsv
-
-    This function is retained for workflows that start directly from
-    events.tsv. The main retained-trial workflow normally receives
-    stim_file and stim_key from export_erp_long.py.
-    """
-
-    language_metrics_path = Path(
-        language_metrics_path
-    ).expanduser().resolve()
-
-    if not language_metrics_path.exists():
-        raise FileNotFoundError(
-            "Language metrics file not found: "
-            f"{language_metrics_path}"
-        )
-
-    if not language_metrics_path.is_file():
-        raise FileNotFoundError(
-            "Language metrics path is not a file: "
-            f"{language_metrics_path}"
-        )
-
-    stimuli = pd.read_csv(
-        language_metrics_path,
-        sep="\t",
-    )
-
-    required_columns = [
-        "stim_file",
-        "stim_key",
-    ]
-
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in stimuli.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            "Language metrics table is missing required "
-            f"columns: {missing_columns}. "
-            "Use ALL_language_metrics.tsv, not "
-            "ALL_language_metrics_GLM.tsv, for this lookup."
-        )
-
-    stimuli = stimuli.copy()
-
-    stimuli["stim_file"] = normalise_stim_file(
-        stimuli["stim_file"]
-    )
-
-    stimuli["stim_key"] = normalise_stim_key(
-        stimuli["stim_key"]
-    )
-
-    missing_stim_files = (
-        stimuli["stim_file"].isna()
-        | stimuli["stim_file"].eq("")
-    )
-
-    if missing_stim_files.any():
-        raise ValueError(
-            "Language metrics table contains "
-            f"{int(missing_stim_files.sum())} missing or empty "
-            "stim_file values."
-        )
-
-    missing_stim_keys = (
-        stimuli["stim_key"].isna()
-        | stimuli["stim_key"].eq("")
-    )
-
-    if missing_stim_keys.any():
-        raise ValueError(
-            "Language metrics table contains "
-            f"{int(missing_stim_keys.sum())} missing or empty "
-            "stim_key values."
-        )
-
-    conflicting = (
-        stimuli
-        .groupby(
-            "stim_file",
-            dropna=False,
-        )["stim_key"]
-        .nunique(
-            dropna=False
-        )
-    )
-
-    conflicting = conflicting[
-        conflicting > 1
-    ]
-
-    if not conflicting.empty:
-        raise ValueError(
-            "Some stim_file values map to more than one stim_key. "
-            f"Examples: {conflicting.index[:10].tolist()}"
-        )
-
-    lookup = (
-        stimuli[
-            [
-                "stim_file",
-                "stim_key",
-            ]
-        ]
-        .drop_duplicates(
-            subset="stim_file",
-            keep="first",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    print(
-        f"Loaded {len(lookup)} stimulus mappings "
-        f"from {language_metrics_path}"
-    )
-
-    return lookup
 
 def load_language_predictors(predictors_path: Path) -> pd.DataFrame:
     """
@@ -281,20 +124,12 @@ def load_trial_lookup(
     subject: str,
     analysis: str,
 ) -> pd.DataFrame:
-    trial_lookup_path = Path(
-        trial_lookup_path
-    ).expanduser().resolve()
+    trial_lookup_path = Path(trial_lookup_path).expanduser().resolve()
 
     if not trial_lookup_path.exists():
-        raise FileNotFoundError(
-            "Trial lookup file not found: "
-            f"{trial_lookup_path}"
-        )
+        raise FileNotFoundError(f"Trial lookup file not found: {trial_lookup_path}")
 
-    lookup = pd.read_csv(
-        trial_lookup_path,
-        sep="\t",
-    )
+    lookup = pd.read_csv(trial_lookup_path, sep="\t")
 
     required_columns = [
         "subject",
@@ -316,37 +151,18 @@ def load_trial_lookup(
     ]
 
     if missing_columns:
-        raise ValueError(
-            "Trial lookup is missing required columns: "
-            f"{missing_columns}"
-        )
+        raise ValueError(f"Trial lookup is missing required columns: {missing_columns}")
 
     if lookup.empty:
-        raise ValueError(
-            f"Trial lookup is empty: {trial_lookup_path}"
-        )
+        raise ValueError(f"Trial lookup is empty: {trial_lookup_path}")
 
     lookup = lookup.copy()
 
-    lookup["subject"] = (
-        lookup["subject"]
-        .astype("string")
-        .str.strip()
-    )
+    lookup["subject"] = lookup["subject"].astype("string").str.strip()
+    lookup["analysis"] = lookup["analysis"].astype("string").str.strip()
 
-    lookup["analysis"] = (
-        lookup["analysis"]
-        .astype("string")
-        .str.strip()
-    )
-
-    subject = normalise_subject_id(
-        subject
-    )
-
-    analysis = str(
-        analysis
-    ).strip()
+    subject = normalise_subject_id(subject)
+    analysis = str(analysis).strip()
 
     lookup = lookup[
         lookup["subject"].eq(subject)
@@ -355,17 +171,12 @@ def load_trial_lookup(
 
     if lookup.empty:
         raise ValueError(
-            "No retained-trial lookup rows found for "
-            f"subject={subject}, analysis={analysis}."
+            f"No retained-trial lookup rows found for subject={subject}, analysis={analysis}."
         )
 
-    lookup["stim_key"] = normalise_stim_key(
-        lookup["stim_key"]
-    )
-
-    lookup["stim_file"] = normalise_stim_file(
-        lookup["stim_file"]
-    )
+    lookup["stim_key"] = normalise_stim_key(lookup["stim_key"])
+    lookup["stim_file"] = normalise_stim_file(lookup["stim_file"])
+    lookup["trial_type"] = lookup["trial_type"].astype("string").str.strip().str.upper()
 
     integer_columns = [
         "condition",
@@ -387,9 +198,7 @@ def load_trial_lookup(
 
     if missing_stim_keys.any():
         raise ValueError(
-            "Filtered trial lookup contains "
-            f"{int(missing_stim_keys.sum())} missing or empty "
-            "stim_key values."
+            f"Filtered trial lookup contains {int(missing_stim_keys.sum())} missing or empty stim_key values."
         )
 
     missing_stim_files = (
@@ -399,9 +208,7 @@ def load_trial_lookup(
 
     if missing_stim_files.any():
         raise ValueError(
-            "Filtered trial lookup contains "
-            f"{int(missing_stim_files.sum())} missing or empty "
-            "stim_file values."
+            f"Filtered trial lookup contains {int(missing_stim_files.sum())} missing or empty stim_file values."
         )
 
     duplicated_retained_trials = lookup.duplicated(
@@ -428,337 +235,13 @@ def load_trial_lookup(
         )
 
         raise ValueError(
-            "Filtered trial lookup contains duplicate "
-            "condition/retained_trial combinations. "
-            f"Examples: {examples}"
+            f"Filtered trial lookup contains duplicate condition/retained_trial combinations. Examples: {examples}"
         )
 
-    duplicated_events = lookup.duplicated(
-        subset=[
-            "original_event_row",
-        ],
-        keep=False,
-    )
-
-    if duplicated_events.any():
-        examples = (
-            lookup.loc[
-                duplicated_events,
-                [
-                    "subject",
-                    "analysis",
-                    "condition",
-                    "retained_trial",
-                    "original_event_row",
-                    "stim_key",
-                ],
-            ]
-            .head(10)
-            .to_dict("records")
-        )
-
-        raise ValueError(
-            "The same original event is assigned to more than "
-            "one retained ERP trial after filtering. "
-            f"Examples: {examples}"
-        )
-
-    lookup = lookup.reset_index(
-        drop=True
-    )
-
-    lookup["eeg_trial"] = range(
-        1,
-        len(lookup) + 1,
-    )
+    lookup = lookup.reset_index(drop=True)
+    lookup["eeg_trial"] = range(1, len(lookup) + 1)
 
     return lookup
-
-def find_stimulus_column(events: pd.DataFrame) -> str:
-    stim_col = next(
-        (
-            col
-            for col in STIMULUS_COLUMNS
-            if col in events.columns
-        ),
-        None,
-    )
-
-    if stim_col is None:
-        raise ValueError(
-            "No stimulus identifier was found in events.tsv. "
-            f"Checked: {STIMULUS_COLUMNS}"
-        )
-
-    return stim_col
-
-
-def load_subject_events(
-    events_path: Path,
-    stimulus_lookup: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Load one subject's events.tsv.
-
-    Only NPC and NPI sentence trials are retained. stim_key is
-    attached by matching stim_file to the lookup constructed from
-    language_outputs/ALL_language_metrics.tsv.
-
-    This function is retained for workflows that operate directly
-    from events.tsv. The current main workflow uses the retained-trial
-    lookup created by export_erp_long.py.
-    """
-
-    events_path = Path(
-        events_path
-    ).expanduser().resolve()
-
-    if not events_path.exists():
-        raise FileNotFoundError(
-            f"Events file not found: {events_path}"
-        )
-
-    events = pd.read_csv(
-        events_path,
-        sep="\t",
-    )
-
-    if events.empty:
-        raise ValueError(
-            f"Events table is empty: {events_path}"
-        )
-
-    required_columns = [
-        "trial_type",
-        "stim_file",
-    ]
-
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in events.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            f"{events_path} is missing required "
-            f"columns: {missing_columns}"
-        )
-
-    events = events.copy()
-
-    # Preserve the row in the complete events table before filtering.
-    events["original_event_row"] = range(
-        1,
-        len(events) + 1,
-    )
-
-    events["trial_type"] = (
-        events["trial_type"]
-        .astype("string")
-        .str.strip()
-        .str.upper()
-    )
-
-    events = events[
-        events["trial_type"].isin(
-            [
-                "NPC",
-                "NPI",
-            ]
-        )
-    ].copy()
-
-    if events.empty:
-        raise ValueError(
-            f"No NPC or NPI sentence trials found in {events_path}"
-        )
-
-    events["stim_file"] = normalise_stim_file(
-        events["stim_file"]
-    )
-
-    missing_stim_files = (
-        events["stim_file"].isna()
-        | events["stim_file"].eq("")
-    )
-
-    if missing_stim_files.any():
-        raise ValueError(
-            f"{int(missing_stim_files.sum())} NPC/NPI events "
-            "contain missing or empty stim_file values."
-        )
-
-    events = events.merge(
-        stimulus_lookup,
-        on="stim_file",
-        how="left",
-        validate="many_to_one",
-        sort=False,
-        indicator=True,
-    )
-
-    unmatched = (
-        events["_merge"] != "both"
-    )
-
-    if unmatched.any():
-        examples = (
-            events.loc[
-                unmatched,
-                "stim_file",
-            ]
-            .drop_duplicates()
-            .head(10)
-            .tolist()
-        )
-
-        raise ValueError(
-            f"{int(unmatched.sum())} events could not be matched "
-            "to ALL_language_metrics.tsv using stim_file. "
-            f"Examples: {examples}"
-        )
-
-    events = events.drop(
-        columns="_merge"
-    )
-
-    events["subject_trial"] = range(
-        1,
-        len(events) + 1,
-    )
-
-    condition_map = {
-        "NPC": 1,
-        "NPI": 2,
-    }
-
-    events["condition"] = (
-        events["trial_type"]
-        .map(
-            condition_map
-        )
-        .astype(int)
-    )
-
-    events["condition_trial"] = (
-        events
-        .groupby(
-            "condition",
-            sort=False,
-        )
-        .cumcount()
-        + 1
-    )
-
-    print(
-        f"Loaded {len(events)} experimental trials: "
-        f"{int((events['trial_type'] == 'NPC').sum())} NPC and "
-        f"{int((events['trial_type'] == 'NPI').sum())} NPI"
-    )
-
-    return events.reset_index(
-        drop=True
-    )
-
-
-def load_surviving_trials(
-    surviving_trials_path: Path,
-) -> pd.DataFrame:
-    """
-    Load a table specifying which trials remain in the cleaned EEG data.
-
-    Accepted trial-index columns:
-        original_event_row
-        subject_trial
-        trial
-        epoch
-        epoch_index
-    """
-    surviving = pd.read_csv(
-        surviving_trials_path,
-        sep=None,
-        engine="python",
-    )
-
-    candidate_columns = [
-        "original_event_row",
-        "subject_trial",
-        "trial",
-        "epoch",
-        "epoch_index",
-    ]
-
-    trial_col = next(
-        (
-            col
-            for col in candidate_columns
-            if col in surviving.columns
-        ),
-        None,
-    )
-
-    if trial_col is None:
-        raise ValueError(
-            "Surviving-trials table does not contain a recognised "
-            f"trial-index column. Checked: {candidate_columns}"
-        )
-
-    surviving = surviving.copy()
-
-    surviving["original_event_row"] = pd.to_numeric(
-        surviving[trial_col],
-        errors="raise",
-    ).astype(int)
-
-    if surviving["original_event_row"].duplicated().any():
-        raise ValueError(
-            "Surviving-trials table contains duplicate trial indices."
-        )
-
-    return surviving[["original_event_row"]]
-
-
-def restrict_to_surviving_trials(
-    events: pd.DataFrame,
-    surviving_trials: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Restrict events to trials that remain in the cleaned EEG file.
-
-    The order of surviving_trials is preserved.
-    """
-    surviving_trials = surviving_trials.copy()
-
-    surviving_trials["eeg_trial"] = range(
-        1,
-        len(surviving_trials) + 1,
-    )
-
-    filtered = surviving_trials.merge(
-        events,
-        on="original_event_row",
-        how="left",
-        validate="one_to_one",
-        sort=False,
-    )
-
-    if filtered["stim_key"].isna().any():
-        missing_rows = filtered.loc[
-            filtered["stim_key"].isna(),
-            "original_event_row",
-        ].tolist()
-
-        raise ValueError(
-            "Some surviving trial indices were not found in events.tsv: "
-            f"{missing_rows[:10]}"
-        )
-
-    filtered = filtered.sort_values(
-        "eeg_trial"
-    ).reset_index(drop=True)
-
-    return filtered
 
 
 def build_subject_design_matrix(
@@ -1092,134 +575,86 @@ def save_design_matrix(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Build subject-specific LIMO design matrices "
-            "from the combined retained ERP trial lookup and "
-            "language predictors."
-        )
+        description="Build subject-specific LIMO design matrices from the combined retained ERP trial lookup and language predictors."
     )
 
     parser.add_argument(
         "--trial-lookup",
         required=True,
-        help=(
-            "Path to ALL_subjects_ALL_erp_trial_lookup.tsv."
-        ),
+        help="Path to ALL_subjects_ALL_erp_trial_lookup.tsv.",
     )
 
     parser.add_argument(
         "--predictors",
         required=True,
-        help=(
-            "Path to ALL_language_metrics_GLM.tsv."
-        ),
+        help="Path to ALL_language_metrics_GLM.tsv.",
     )
 
     parser.add_argument(
         "--analysis",
         required=True,
-        help=(
-            "ERP analysis to prepare, such as CP, GA, LD, Order, or Time."
-        ),
+        help="ERP analysis to prepare, such as CP, GA, LD, Order, or Time.",
     )
 
     parser.add_argument(
         "--subject",
         default=None,
-        help=(
-            "One subject, such as sub-01 or 1."
-        ),
+        help="One subject, such as sub-01 or 1.",
     )
 
     parser.add_argument(
         "--subjects",
         default=None,
-        help=(
-            "Comma-separated subjects, such as sub-01,sub-02 or 1,2."
-        ),
+        help="Comma-separated subjects, such as sub-01,sub-02 or 1,2.",
     )
 
     parser.add_argument(
         "--output",
         default=None,
-        help=(
-            "Output path for one subject design matrix TSV. "
-            "Use only with --subject."
-        ),
+        help="Output path for one subject design matrix TSV. Use only with --subject.",
     )
 
     parser.add_argument(
         "--output-dir",
         default=None,
-        help=(
-            "Output directory for one or more subject design matrices."
-        ),
+        help="Output directory for one or more subject design matrices.",
     )
 
     args = parser.parse_args()
 
-    trial_lookup_path = Path(
-        args.trial_lookup
-    )
-
-    predictors_path = Path(
-        args.predictors
-    )
-
-    analysis = str(
-        args.analysis
-    ).strip()
+    trial_lookup_path = Path(args.trial_lookup)
+    predictors_path = Path(args.predictors)
+    analysis = str(args.analysis).strip()
 
     if args.subject is not None and args.subjects is not None:
-        raise ValueError(
-            "Use either --subject or --subjects, not both."
-        )
+        raise ValueError("Use either --subject or --subjects, not both.")
 
     if args.subject is None and args.subjects is None:
-        raise ValueError(
-            "You must provide --subject or --subjects."
-        )
+        raise ValueError("You must provide --subject or --subjects.")
 
     if args.subject is not None:
         subjects = [
-            normalise_subject_id(
-                args.subject
-            )
+            normalise_subject_id(args.subject)
         ]
     else:
-        subjects = parse_subject_list(
-            args.subjects
-        )
+        subjects = parse_subject_list(args.subjects)
 
     if args.output is not None and len(subjects) != 1:
-        raise ValueError(
-            "--output can only be used with exactly one subject."
-        )
+        raise ValueError("--output can only be used with exactly one subject.")
 
     if args.output is None and args.output_dir is None:
-        raise ValueError(
-            "Use --output for one subject or --output-dir for one or more subjects."
-        )
+        raise ValueError("Use --output for one subject or --output-dir for one or more subjects.")
 
     if args.output is not None and args.output_dir is not None:
-        raise ValueError(
-            "Use either --output or --output-dir, not both."
-        )
+        raise ValueError("Use either --output or --output-dir, not both.")
 
     if not trial_lookup_path.exists():
-        raise FileNotFoundError(
-            "Trial lookup file not found: "
-            f"{trial_lookup_path}"
-        )
+        raise FileNotFoundError(f"Trial lookup file not found: {trial_lookup_path}")
 
     if not predictors_path.exists():
-        raise FileNotFoundError(
-            f"Predictor file not found: {predictors_path}"
-        )
+        raise FileNotFoundError(f"Predictor file not found: {predictors_path}")
 
-    predictors = load_language_predictors(
-        predictors_path
-    )
+    predictors = load_language_predictors(predictors_path)
 
     written_outputs = []
 
@@ -1241,30 +676,21 @@ def main() -> None:
         )
 
         if args.output is not None:
-            output_path = Path(
-                args.output
-            )
+            output_path = Path(args.output)
         else:
-            output_dir = Path(
-                args.output_dir
-            )
-
-            output_path = (
-                output_dir
-                / f"{subject}_erp-{analysis}_design_matrix.tsv"
-            )
+            output_dir = Path(args.output_dir)
+            output_path = output_dir / f"{subject}_erp-{analysis}_design_matrix.tsv"
 
         save_design_matrix(
             design=design,
             output_path=output_path,
         )
 
-        written_outputs.append(
-            output_path
-        )
+        written_outputs.append(output_path)
 
     print()
     print("Design matrices written:")
+
     for output_path in written_outputs:
         print(output_path)
 
