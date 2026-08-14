@@ -235,6 +235,183 @@ def load_design_matrix(
 
     return design
 
+def normalise_alignment_values(
+    values,
+) -> pd.Series:
+    series = pd.Series(values)
+
+    numeric = pd.to_numeric(
+        series,
+        errors="coerce",
+    )
+
+    if numeric.notna().all():
+        return numeric.astype(int).astype(str)
+
+    return (
+        series
+        .astype("string")
+        .str.strip()
+    )
+
+
+def get_epochs_metadata(
+    epochs,
+) -> pd.DataFrame:
+    if getattr(epochs, "metadata", None) is not None:
+        metadata = epochs.metadata.copy()
+
+        if len(metadata) == len(epochs):
+            return metadata.reset_index(drop=True)
+
+    return pd.DataFrame(index=range(len(epochs)))
+
+
+def build_epoch_identity_table(
+    epochs,
+) -> pd.DataFrame:
+    identity = pd.DataFrame(
+        {
+            "eeg_trial": np.arange(
+                1,
+                len(epochs) + 1,
+                dtype=int,
+            )
+        }
+    )
+
+    metadata = get_epochs_metadata(
+        epochs
+    )
+
+    for column in metadata.columns:
+        identity[column] = metadata[column].to_numpy()
+
+    if getattr(epochs, "events", None) is not None:
+        events = np.asarray(
+            epochs.events
+        )
+
+        if events.ndim == 2 and events.shape[0] == len(epochs) and events.shape[1] >= 3:
+            identity["mne_event_sample"] = events[:, 0]
+            identity["mne_event_previous"] = events[:, 1]
+            identity["mne_event_id"] = events[:, 2]
+
+    return identity
+
+
+def find_epoch_alignment_pair(
+    epoch_identity: pd.DataFrame,
+    design: pd.DataFrame,
+) -> tuple[str, str] | None:
+    candidate_pairs = [
+        ("urevent_index", "urevent_index"),
+        ("eventurevent", "urevent_index"),
+        ("urevent", "urevent_index"),
+        ("original_urevent", "urevent_index"),
+        ("eeglab_urevent", "urevent_index"),
+        ("original_event_row", "original_event_row"),
+        ("event_row", "original_event_row"),
+        ("epoch_index", "eeg_trial"),
+        ("epoch", "eeg_trial"),
+        ("eeg_trial", "eeg_trial"),
+    ]
+
+    for epoch_column, design_column in candidate_pairs:
+        if epoch_column in epoch_identity.columns and design_column in design.columns:
+            return epoch_column, design_column
+
+    return None
+
+
+def validate_epoch_alignment(
+    epochs,
+    design: pd.DataFrame,
+    allow_unverified_alignment: bool = False,
+) -> None:
+    if len(design) != len(epochs):
+        raise ValueError(
+            "Design rows and EEG epochs do not match. "
+            f"Design rows: {len(design)}, EEG epochs: {len(epochs)}."
+        )
+
+    epoch_identity = build_epoch_identity_table(
+        epochs
+    )
+
+    pair = find_epoch_alignment_pair(
+        epoch_identity=epoch_identity,
+        design=design,
+    )
+
+    if pair is None:
+        available_epoch_columns = epoch_identity.columns.tolist()
+        available_design_columns = design.columns.tolist()
+
+        message = (
+            "Cannot verify EEG epoch identity against the design matrix. "
+            "The .set file did not expose a usable epoch identity column "
+            "matching urevent_index, original_event_row, or eeg_trial. "
+            f"Epoch columns available: {available_epoch_columns}. "
+            f"Design columns available: {available_design_columns}."
+        )
+
+        if allow_unverified_alignment:
+            print("WARNING: " + message)
+            return
+
+        raise ValueError(
+            message
+        )
+
+    epoch_column, design_column = pair
+
+    epoch_values = normalise_alignment_values(
+        epoch_identity[epoch_column]
+    )
+
+    design_values = normalise_alignment_values(
+        design[design_column]
+    )
+
+    mismatched = (
+        epoch_values.to_numpy()
+        != design_values.to_numpy()
+    )
+
+    if mismatched.any():
+        mismatch_indices = np.where(
+            mismatched
+        )[0][:10]
+
+        examples = []
+
+        for index in mismatch_indices:
+            examples.append(
+                {
+                    "row": int(index + 1),
+                    "epoch_column": epoch_column,
+                    "epoch_value": str(epoch_values.iloc[index]),
+                    "design_column": design_column,
+                    "design_value": str(design_values.iloc[index]),
+                    "stim_key": (
+                        str(design["stim_key"].iloc[index])
+                        if "stim_key" in design.columns
+                        else ""
+                    ),
+                }
+            )
+
+        raise ValueError(
+            "EEG epoch order does not match the design matrix. "
+            f"Compared epoch column '{epoch_column}' with design column "
+            f"'{design_column}'. Examples: {examples}"
+        )
+
+    print(
+        "Verified EEG/design alignment using "
+        f"{epoch_column} == {design_column}."
+    )
 
 def parse_predictor_list(value: str | None) -> list[str] | None:
     if value is None:
@@ -826,6 +1003,15 @@ def main() -> None:
         help="Do not add intercept column.",
     )
 
+    parser.add_argument(
+        "--allow-unverified-alignment",
+        action="store_true",
+        help=(
+            "Continue if the .set file does not expose epoch metadata "
+            "that can be compared against the design matrix."
+        ),
+    )
+
     args = parser.parse_args()
 
     eeg_set_path = Path(args.eeg_set)
@@ -843,11 +1029,17 @@ def main() -> None:
     print(f"Reading EEG epochs: {eeg_set_path}")
     epochs = read_epochs(eeg_set_path)
 
-    data = epochs.get_data()
-    print(f"EEG data shape: {data.shape} = trials x channels x times")
-
     design = load_design_matrix(design_path)
     print(f"Design rows: {len(design)}")
+
+    validate_epoch_alignment(
+        epochs=epochs,
+        design=design,
+        allow_unverified_alignment=args.allow_unverified_alignment,
+    )
+
+    data = epochs.get_data()
+    print(f"EEG data shape: {data.shape} = trials x channels x times")
 
     if len(design) != data.shape[0]:
         raise ValueError(
@@ -892,6 +1084,9 @@ def main() -> None:
         "n_epochs_used": int(data_valid.shape[0]),
         "n_channels": int(data.shape[1]),
         "n_times": int(data.shape[2]),
+        "alignment_verification": (
+            "verified_or_explicitly_allowed_unverified"
+        ),
         "note": (
             "Python LIMO-style first-level mass-univariate GLM; "
             "not official MATLAB LIMO output."
