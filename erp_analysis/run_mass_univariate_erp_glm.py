@@ -943,38 +943,6 @@ def save_hdf5(
         write_string_dataset(h5, "predictor_names", predictor_names)
         write_string_dataset(h5, "channel_names", channel_names)
 
-
-def save_long_table(
-    output_dir: Path,
-    beta: np.ndarray,
-    t_values: np.ndarray,
-    predictor_names: list[str],
-    channel_names: list[str],
-    times: np.ndarray,
-) -> None:
-    rows = []
-
-    for pred_idx, predictor in enumerate(predictor_names):
-        for ch_idx, channel in enumerate(channel_names):
-            rows.append(
-                pd.DataFrame(
-                    {
-                        "predictor": predictor,
-                        "channel": channel,
-                        "time": times,
-                        "beta": beta[pred_idx, ch_idx, :],
-                        "t": t_values[pred_idx, ch_idx, :],
-                    }
-                )
-            )
-
-    out = pd.concat(rows, ignore_index=True)
-
-    out_path = output_dir / "erp_glm_beta_t_long.tsv"
-    out.to_csv(out_path, sep="\t", index=False)
-
-    print(f"Saved long beta/t table: {out_path}")
-
 def parse_filter_list(value: str | None) -> list[str] | None:
     if value is None:
         return None
@@ -1205,7 +1173,6 @@ def run_one_erp_glm_model(
     requested_predictors: list[str] | None,
     add_intercept: bool,
     allow_unverified_alignment: bool,
-    write_long_table_output: bool,
 ) -> dict:
     eeg_mat_path = Path(eeg_mat_path).expanduser().resolve()
     design_path = Path(design_path).expanduser().resolve()
@@ -1338,64 +1305,6 @@ def run_one_erp_glm_model(
         metadata=metadata,
     )
 
-    np.save(
-        output_dir / "beta.npy",
-        results["beta"],
-    )
-
-    np.save(
-        output_dir / "t_values.npy",
-        results["t"],
-    )
-
-    np.save(
-        output_dir / "residual_variance.npy",
-        results["residual_variance"],
-    )
-
-    pd.DataFrame(
-        {
-            "predictor": predictor_names,
-            "column_index": range(len(predictor_names)),
-        }
-    ).to_csv(
-        output_dir / "predictor_names.tsv",
-        sep="\t",
-        index=False,
-    )
-
-    pd.DataFrame(
-        {
-            "channel": channel_names,
-            "channel_index": range(len(channel_names)),
-        }
-    ).to_csv(
-        output_dir / "channel_names.tsv",
-        sep="\t",
-        index=False,
-    )
-
-    pd.DataFrame(
-        {
-            "time": times,
-            "time_index": range(len(times)),
-        }
-    ).to_csv(
-        output_dir / "times.tsv",
-        sep="\t",
-        index=False,
-    )
-
-    if write_long_table_output:
-        save_long_table(
-            output_dir=output_dir,
-            beta=results["beta"],
-            t_values=results["t"],
-            predictor_names=predictor_names,
-            channel_names=channel_names,
-            times=times,
-        )
-
     summary = {
         "subject": str(subject),
         "analysis": str(analysis),
@@ -1414,11 +1323,6 @@ def run_one_erp_glm_model(
         "hdf5_output": str(h5_path),
         "error": "",
     }
-
-    write_json(
-        output_dir / "erp_glm_model_summary.json",
-        summary,
-    )
 
     print("Done.")
     print(
@@ -1538,19 +1442,11 @@ def main() -> None:
         help="Batch mode: skip models whose erp_glm_results.h5 already exists.",
     )
 
-    parser.add_argument(
-        "--no-long-table",
-        action="store_true",
-        help="Do not write erp_glm_beta_t_long.tsv.",
-    )
-
     args = parser.parse_args()
 
     requested_predictors = parse_predictor_list(args.predictor_list)
 
     add_intercept = not args.no_intercept
-
-    write_long_table_output = not args.no_long_table
 
     single_mode_values = [
         args.eeg_mat,
@@ -1579,7 +1475,6 @@ def main() -> None:
             requested_predictors=requested_predictors,
             add_intercept=add_intercept,
             allow_unverified_alignment=args.allow_unverified_alignment,
-            write_long_table_output=write_long_table_output,
         )
 
         return
@@ -1623,36 +1518,6 @@ def main() -> None:
         parents=True,
         exist_ok=True,
     )
-
-    run_config = {
-        "mode": "batch",
-        "design_dir": str(design_dir),
-        "erp_root": str(erp_root) if erp_root is not None else "",
-        "output_root": str(output_root),
-        "subjects": args.subjects,
-        "analyses": args.analyses,
-        "predictor_list": requested_predictors,
-        "add_intercept": bool(add_intercept),
-        "allow_unverified_alignment": bool(args.allow_unverified_alignment),
-        "skip_existing": bool(args.skip_existing),
-        "write_long_table": bool(write_long_table_output),
-        "model_type": "trial-level mass-univariate ERP GLM",
-        "official_limo_toolbox": False,
-    }
-
-    write_json(
-        output_root / "erp_glm_run_config.json",
-        run_config,
-    )
-
-    batch_summary_path = output_root / "erp_glm_batch_summary.tsv"
-    failed_models_path = output_root / "erp_glm_failed_models.tsv"
-
-    if batch_summary_path.exists():
-        batch_summary_path.unlink()
-
-    if failed_models_path.exists():
-        failed_models_path.unlink()
 
     design_paths = discover_design_matrices(design_dir)
 
@@ -1713,144 +1578,34 @@ def main() -> None:
             h5_path = output_dir / "erp_glm_results.h5"
 
             if args.skip_existing and h5_path.exists():
-                row = {
-                    "subject": str(subject),
-                    "analysis": str(analysis),
-                    "eeg_mat": str(eeg_mat_path),
-                    "design_matrix": str(design_path),
-                    "output_dir": str(output_dir),
-                    "status": "skipped",
-                    "n_design_rows": int(len(design)),
-                    "n_epochs_original": "",
-                    "n_epochs_used": "",
-                    "n_channels": "",
-                    "n_times": "",
-                    "n_predictors_including_intercept": "",
-                    "rank": "",
-                    "dof": "",
-                    "hdf5_output": str(h5_path),
-                    "error": "",
-                }
-
-                append_tsv(
-                    pd.DataFrame([row]),
-                    batch_summary_path,
-                )
-
                 skipped += 1
-
                 print()
                 print(f"SKIP existing: {subject} {analysis}")
-
                 continue
 
-            summary = run_one_erp_glm_model(
+            run_one_erp_glm_model(
                 eeg_mat_path=eeg_mat_path,
                 design_path=design_path,
                 output_dir=output_dir,
                 requested_predictors=requested_predictors,
                 add_intercept=add_intercept,
                 allow_unverified_alignment=args.allow_unverified_alignment,
-                write_long_table_output=write_long_table_output,
-            )
-
-            append_tsv(
-                pd.DataFrame([summary]),
-                batch_summary_path,
             )
 
             completed += 1
 
         except Exception as error:
             failed += 1
-
-            error_message = str(error)
-
-            failed_row = {
-                "subject": "",
-                "analysis": "",
-                "eeg_mat": "",
-                "design_matrix": str(design_path),
-                "output_dir": "",
-                "status": "failed",
-                "n_design_rows": "",
-                "n_epochs_original": "",
-                "n_epochs_used": "",
-                "n_channels": "",
-                "n_times": "",
-                "n_predictors_including_intercept": "",
-                "rank": "",
-                "dof": "",
-                "hdf5_output": "",
-                "error": error_message,
-            }
-
-            try:
-                failed_design = load_design_matrix(design_path)
-
-                failed_row["subject"] = get_single_design_value(
-                    design=failed_design,
-                    column="subject",
-                    design_path=design_path,
-                )
-
-                failed_row["analysis"] = get_single_design_value(
-                    design=failed_design,
-                    column="analysis",
-                    design_path=design_path,
-                )
-
-                failed_output_dir = make_model_output_dir(
-                    output_root=output_root,
-                    subject=failed_row["subject"],
-                    analysis=failed_row["analysis"],
-                )
-
-                failed_row["output_dir"] = str(failed_output_dir)
-
-                try:
-                    failed_row["eeg_mat"] = str(
-                        resolve_eeg_mat_path(
-                            design=failed_design,
-                            design_path=design_path,
-                            erp_root=erp_root,
-                        )
-                    )
-
-                except Exception:
-                    failed_row["eeg_mat"] = ""
-
-            except Exception:
-                pass
-
-            append_tsv(
-                pd.DataFrame([failed_row]),
-                batch_summary_path,
-            )
-
-            append_tsv(
-                pd.DataFrame([failed_row]),
-                failed_models_path,
-            )
-
             print()
             print(f"FAILED: {design_path}")
-            print(error_message)
+            print(str(error))
 
     final_summary = {
         "attempted": int(attempted),
         "completed": int(completed),
         "skipped": int(skipped),
         "failed": int(failed),
-        "batch_summary": str(batch_summary_path),
-        "failed_models": str(failed_models_path),
-        "run_config": str(output_root / "erp_glm_run_config.json"),
     }
-
-    write_json(
-        output_root / "erp_glm_batch_summary.json",
-        final_summary,
-    )
 
     print()
     print("Batch complete.")
